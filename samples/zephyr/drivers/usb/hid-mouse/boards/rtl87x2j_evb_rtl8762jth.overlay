@@ -1,0 +1,110 @@
+/*
+ * Copyright (c) 2026, Realtek Semiconductor Corporation
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/input/keymap.h>
+
+/ {
+	hid_dev_0: hid_dev_0 {
+		compatible = "zephyr,hid-device";
+		label = "HID0";
+		/* "mouse" makes the device advertise the HID boot interface
+		 * (bInterfaceSubClass=1, bInterfaceProtocol=2), so the host may
+		 * switch it to Boot Protocol via SET_PROTOCOL (e.g. BIOS/UEFI).
+		 */
+		protocol-code = "mouse";
+		in-polling-period-us = <125>;
+		in-report-size = <64>;
+	};
+};
+
+/* Faster console, so logging keeps up with the 8 kHz report rate. */
+&uart2 {
+	current-speed = <2000000>;
+};
+
+/* Mouse mode: keys are scanned every 1 ms, which is plenty for buttons next to
+ * the 8 kHz sensor data. Timing rules:
+ *  - The delay clock is 5 MHz / 2 / 50 = 50 kHz (20 us per tick), every timer
+ *    counts at most 511 ticks.
+ *  - The software debounce only remembers the last 30 scans (30 ms here).
+ *  - As a precaution the release time is kept longer than the release
+ *    debounce, so the all-release interrupt cannot come before the release
+ *    has been debounced.
+ */
+&keyscan {
+	pinctrl-0 = <&keyscan_default>;
+	pinctrl-names = "default";
+	row-size = <2>;
+	col-size = <2>;
+	scan-div = <1>;
+	delay-div = <49>;
+	debounce-down-ms = <5>;
+	debounce-up-ms = <5>;
+	poll-period-us = <600>;
+	release-time-us = <10000>;
+	status = "okay";
+
+	/* Turns the row/column events of the matrix into the key codes the
+	 * sample handles: left button, right button, move X, move Y.
+	 */
+	keymap {
+		compatible = "input-keymap";
+		keymap = <MATRIX_KEY(0, 0, INPUT_KEY_0)
+			  MATRIX_KEY(0, 1, INPUT_KEY_1)
+			  MATRIX_KEY(1, 0, INPUT_KEY_2)
+			  MATRIX_KEY(1, 1, INPUT_KEY_3)>;
+		row-size = <2>;
+		col-size = <2>;
+	};
+};
+
+/* The MCUboot layout (boot-patch + two 343K image slots) fills the whole
+ * eflash, so both image slots are shrunk to 243K and the two DFU slots take
+ * the 200K freed at the end. Both offsets are 1K aligned, matching the eflash
+ * erase-block size. MCUboot must see the same layout, see
+ * sysbuild/mcuboot.overlay.
+ */
+&slot0_partition {
+	reg = <0x8800 DT_SIZE_K(243)>;
+};
+
+&slot1_partition {
+	reg = <0x45400 DT_SIZE_K(243)>;
+};
+
+&eflash {
+	partitions {
+		dfu_slot_a: partition@82000 {
+			label = "dfu-slot-a";
+			reg = <0x82000 DT_SIZE_K(100)>;
+		};
+
+		dfu_slot_b: partition@9b000 {
+			label = "dfu-slot-b";
+			reg = <0x9b000 DT_SIZE_K(100)>;
+		};
+	};
+};
+
+&pinctrl {
+	keyscan_default: keyscan_default {
+		group1 {
+			psels = <BEE_PSEL(KEY_COL_0, P2_0)>,
+				<BEE_PSEL(KEY_COL_1, P3_6)>;
+			output-enable;
+			output-low;
+			bias-disable;
+		};
+
+		group2 {
+			psels = <BEE_PSEL(KEY_ROW_0, P0_6)>,
+				<BEE_PSEL(KEY_ROW_1, P0_7)>;
+			output-disable;
+			bias-pull-up;
+			bias-pull-strong;
+		};
+	};
+};
