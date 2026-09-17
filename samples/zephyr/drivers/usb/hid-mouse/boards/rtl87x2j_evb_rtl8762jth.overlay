@@ -1,0 +1,43 @@
+/*
+ * Copyright (c) 2026, Realtek Semiconductor Corporation
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	hid_dev_0: hid_dev_0 {
+		compatible = "zephyr,hid-device";
+		label = "HID0";
+		/* "mouse" makes the device advertise the HID boot interface
+		 * (bInterfaceSubClass=1, bInterfaceProtocol=2), so the host may
+		 * switch it to Boot Protocol via SET_PROTOCOL (e.g. BIOS/UEFI).
+		 */
+		protocol-code = "mouse";
+		in-polling-period-us = <1000>;
+		in-report-size = <64>;
+	};
+};
+
+/* The board layout has no slot-0/slot-1 partitions, so the two DFU slots are
+ * carved out of the free space that application otherwise claims. The 403K
+ * between 0x4f400 and the end of eflash is split into 203K for the application
+ * plus two 100K slots. Both offsets are 1K aligned, matching the eflash
+ * erase-block size.
+ */
+&app_partition {
+	reg = <0x4f400 DT_SIZE_K(203)>;
+};
+
+&eflash {
+	partitions {
+		dfu_slot_a: partition@82000 {
+			label = "dfu-slot-a";
+			reg = <0x82000 DT_SIZE_K(100)>;
+		};
+
+		dfu_slot_b: partition@9b000 {
+			label = "dfu-slot-b";
+			reg = <0x9b000 DT_SIZE_K(100)>;
+		};
+	};
+};
