@@ -1,0 +1,8 @@
+# Copyright (c) 2026, Realtek Semiconductor Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# Pull in the common USB sample options (SAMPLE_USBD_* etc.) - this also
+# provides CONFIG_SAMPLE_USBD_REMOTE_WAKEUP which arms the device.
+source "samples/subsys/usb/common/Kconfig.sample_usbd"
+
+source "Kconfig.zephyr"

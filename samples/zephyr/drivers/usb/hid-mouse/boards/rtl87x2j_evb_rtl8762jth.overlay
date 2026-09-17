@@ -1,0 +1,19 @@
+/*
+ * Copyright (c) 2026, Realtek Semiconductor Corporation
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	hid_dev_0: hid_dev_0 {
+		compatible = "zephyr,hid-device";
+		label = "HID0";
+		/* "mouse" makes the device advertise the HID boot interface
+		 * (bInterfaceSubClass=1, bInterfaceProtocol=2), so the host may
+		 * switch it to Boot Protocol via SET_PROTOCOL (e.g. BIOS/UEFI).
+		 */
+		protocol-code = "mouse";
+		in-polling-period-us = <1000>;
+		in-report-size = <64>;
+	};
+};
