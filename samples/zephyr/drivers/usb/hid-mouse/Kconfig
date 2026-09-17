@@ -1,0 +1,16 @@
+# Copyright (c) 2026, Realtek Semiconductor Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# Pull in the common USB sample options (SAMPLE_USBD_* etc.) - this also
+# provides CONFIG_SAMPLE_USBD_REMOTE_WAKEUP which arms the device.
+source "samples/subsys/usb/common/Kconfig.sample_usbd"
+
+config APP_DFU_MODE_PID
+	hex "Product ID of the DFU mode device"
+	default 0xffff
+	help
+	  Product ID used by the DFU mode device, which replaces the run-time
+	  HID device after DFU_DETACH. It must differ from CONFIG_SAMPLE_USBD_PID
+	  so the host does not reuse the cached HID configuration.
+
+source "Kconfig.zephyr"
