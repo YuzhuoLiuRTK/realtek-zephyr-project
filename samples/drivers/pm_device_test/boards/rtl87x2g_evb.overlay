@@ -9,7 +9,7 @@
 #include <zephyr/dt-bindings/led/led.h>
 #include <zephyr/dt-bindings/i2c/i2c.h>
 
-/* 
+/*
 P0_0 GPIO(TEST OUT)
 P0_1 GPIO(TEST IN)
 P0_2 PWM6
@@ -69,20 +69,16 @@ P10_0 SDHC
 		in-gpios = <&gpioa 1 (GPIO_ACTIVE_HIGH | BEE_GPIO_INPUT_DEBOUNCE_MS(8) | BEE_GPIO_INPUT_PM_WAKEUP)>;
 	};
 
-	chosen {
-		zephyr,keyboard-scan = &kscan_input;
-	};
-
 	zephyr,user {
 		io-channels = <&adc 4>;
 	};
 
 	aliases {
 		test-uart-dma = &uart3;
-		test-counter-timer = &timer5;
+		test-counter-timer = &counter5;
 		test-pwm = &pwm6;
 		test-rtc = &rtc;
-		test-aon-qdec = &aon_qdec;
+		test-qdec = &aon_qdec;
 		test-qenca = &phase_a;
 		test-qencb = &phase_b;
 		test-i2c = &i2c0;
@@ -107,11 +103,12 @@ P10_0 SDHC
 	pinctrl-0 = <&uart2_default>;
 	pinctrl-1 = <&uart2_sleep>;
 	pinctrl-names = "default", "sleep";
-    status = "okay";
-    current-speed = <2000000>;
-    parity = "none";
-    stop-bits = "1";
-    data-bits = <8>;
+	status = "okay";
+	current-speed = <2000000>;
+	parity = "none";
+	stop-bits = "1";
+	data-bits = <8>;
+	wakeup-source;
 };
 
 &uart3 {
@@ -125,6 +122,7 @@ P10_0 SDHC
 	data-bits = <8>;
 	dmas = <&dma0 0 7 0xa>, <&dma0 1 6 0x10021>;
 	dma-names = "rx", "tx";
+	wakeup-source;
 };
 
 &dma0 {
@@ -132,25 +130,34 @@ P10_0 SDHC
 };
 
 &gpioa {
+	pinctrl-0 = <&gpioa_default>;
+	pinctrl-names = "default";
 	status = "okay";
 };
 
 &gpiob {
+	pinctrl-0 = <&gpiob_default>;
+	pinctrl-names = "default";
 	status = "okay";
 };
 
 &timer5 {
 	status = "okay";
 	prescaler = <1>;
+
+	counter5: counter {
+		status = "okay";
+	};
 };
 
 &timer6 {
 	status = "okay";
 	prescaler = <1>;
-	pwm6: pwm6 {
-			status = "okay";
-			pinctrl-0 = <&pwm6_default>;
-			pinctrl-names = "default";
+
+	pwm6: pwm {
+		status = "okay";
+		pinctrl-0 = <&pwm6_default>;
+		pinctrl-names = "default";
 	};
 };
 
@@ -176,64 +183,53 @@ P10_0 SDHC
 };
 
 &rtc {
-    status = "okay";
-    prescaler = <3200>;
+	status = "okay";
+	prescaler = <3200>;
 };
 
 &aon_qdec {
 	status = "okay";
+	x-enable;
 	x-counts-per-revolution = <4>;
 	x-debounce-time-ms = <5>;
 	pinctrl-0 = <&aon_qdec_default>;
 	pinctrl-names = "default";
 };
 
-&kscan {
+&keyscan {
 	pinctrl-0 = <&input_kscan_default>;
 	pinctrl-1 = <&input_kscan_sleep>;
 	pinctrl-names = "default", "sleep";
 	row-size = <2>;
 	col-size = <2>;
-	debounce-time-us = <20000>;
-	scan-time-us = <20000>;
+	scan-div = <15>;
+	delay-div = <63>;
+	debounce-down-ms = <10>;
+	debounce-up-ms = <10>;
+	poll-period-us = <50000>;
 	release-time-us = <5000>;
-	scan-debounce-cnt = <0>;
 	status = "okay";
-	kscan_input: kscan-input {
-		compatible = "zephyr,kscan-input";
-	};
-	keymap {
-		compatible = "input-keymap";
-		keymap = <
-			MATRIX_KEY(0, 0, INPUT_KEY_1)
-			MATRIX_KEY(0, 1, INPUT_KEY_2)
-			MATRIX_KEY(1, 0, INPUT_KEY_3)
-			MATRIX_KEY(1, 1, INPUT_KEY_4)
-		>;
-		row-size = <2>;
-		col-size = <2>;
-	};
 };
 
 &adc {
-    pinctrl-0 = <&adc_default>;
-    pinctrl-names = "default";
-    #address-cells = <1>;
-    #size-cells = <0>;
-    status = "okay";
-    channel@4 {
-        reg = <4>;
-        zephyr,gain = "ADC_GAIN_1";
-        zephyr,reference = "ADC_REF_INTERNAL";
-        zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
-        zephyr,resolution = <12>;
-    };
+	pinctrl-0 = <&adc_default>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	channel@4 {
+		reg = <4>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
 };
 
 &can {
-    pinctrl-0 = <&can_default>;
+	pinctrl-0 = <&can_default>;
 	pinctrl-1 = <&can_sleep>;
-    pinctrl-names = "default", "sleep";
+	pinctrl-names = "default", "sleep";
 	status = "okay";
 };
 
@@ -248,9 +244,24 @@ P10_0 SDHC
 };
 
 &pinctrl {
+	gpioa_default: gpioa_default {
+		group1 {
+			psels = <BEE_PSEL(DWGPIO, P0_0, DIR_OUT, DRV_HIGH, PULL_UP)>,
+			<BEE_PSEL(DWGPIO, P0_1, DIR_IN, DRV_HIGH, PULL_UP)>,
+			<BEE_PSEL(DWGPIO, P0_4, DIR_IN, DRV_HIGH, PULL_UP)>,
+			<BEE_PSEL(DWGPIO, P0_5, DIR_IN, DRV_HIGH, PULL_UP)>;
+		};
+	};
+
+	gpiob_default: gpiob_default {
+		group1 {
+			psels = <BEE_PSEL(DWGPIO, P4_3, DIR_OUT, DRV_HIGH, PULL_UP)>;
+		};
+	};
+
 	uart2_default: uart2_default {
 		group1 {
-			psels = <BEE_PSEL(UART2_TX, P3_2, DIR_OUT, DRV_HIGH, PULL_UP)>, 
+			psels = <BEE_PSEL(UART2_TX, P3_2, DIR_OUT, DRV_HIGH, PULL_UP)>,
 			<BEE_PSEL(UART2_RX, P3_3, DIR_IN, DRV_HIGH, PULL_UP)>;
 		};
 	};
@@ -267,7 +278,7 @@ P10_0 SDHC
 
 	uart3_default: uart3_default {
 		group1 {
-			psels = <BEE_PSEL(UART3_TX, P4_4, DIR_OUT, DRV_HIGH, PULL_UP)>, 
+			psels = <BEE_PSEL(UART3_TX, P4_4, DIR_OUT, DRV_HIGH, PULL_UP)>,
 			<BEE_PSEL(UART3_RX, P4_5, DIR_IN, DRV_HIGH, PULL_UP)>;
 		};
 	};
@@ -295,7 +306,7 @@ P10_0 SDHC
 				psels = <BEE_PSEL(TIMER_PWM6, P0_2, DIR_OUT, DRV_HIGH, PULL_UP)>;
 		};
 	};
-	
+
 	aon_qdec_default: aon_qdec_default {
 		group1 {
 			psels = <BEE_PSEL(QDPH0_IN_P1_3_P1_4, P1_3, DIR_IN, DRV_LOW, PULL_NONE)>,
