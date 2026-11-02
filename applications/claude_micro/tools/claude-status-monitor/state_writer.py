@@ -3,12 +3,14 @@
 Claude Code hook -> monitor state file writer.
 
 Usage (configured in ~/.claude/settings.json hooks):
-  python D:/ai/bt2/tools/claude-status-monitor/state_writer.py <event>
+  python <path>/claude-status-monitor/state_writer.py <event>
 
 Events:
   pre_tool   -- PreToolUse  (Claude is actively running a tool)
   permission -- PermissionRequest  (needs user confirmation)
   stop       -- Stop  (task complete)
+
+Unknown events are ignored and leave the state file untouched.
 """
 import hashlib
 import json
@@ -41,6 +43,8 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 def main() -> None:
     event = sys.argv[1] if len(sys.argv) > 1 else "unknown"
+    if event not in _EVENT_STATUS:
+        return
 
     payload: dict = {}
     try:
@@ -65,7 +69,7 @@ def main() -> None:
         "session_key": key,
         "project":     project_name,
         "project_dir": project_dir,
-        "status":      _EVENT_STATUS.get(event, "working"),
+        "status":      _EVENT_STATUS[event],
         "tool":        payload.get("tool_name", payload.get("tool", "")),
         "created_at":  created_at,
         "updated_at":  time.time(),

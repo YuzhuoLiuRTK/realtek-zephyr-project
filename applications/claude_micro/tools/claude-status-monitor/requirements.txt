@@ -1,0 +1,14 @@
+# Teams notification (notify.py)
+requests
+
+# claude_micro device listener (device_listener.py)
+hidapi
+numpy
+sounddevice
+faster-whisper
+pyperclip
+pyautogui
+
+# Optional
+opencc-python-reimplemented   # Traditional -> Simplified Chinese for transcripts
+Pillow                        # smoother logo scaling in monitor_ui.py

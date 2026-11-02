@@ -7,6 +7,10 @@
  * Raw PCM path (no encoding):
  *   i2s_read() → app_usb_audio_send() → USB UAC ring buffer → host
  *
+ * The rx thread is the only producer of the UAC ring buffer and the USB SOF
+ * callback the only consumer, so the PCM is copied straight out of the I2S
+ * slab block into the ring buffer and the block is freed right away.
+ *
  * Thread lifecycle
  * ────────────────
  * The rx thread is created once and loops forever.  Each "recording session"
@@ -28,13 +32,12 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
 #include <config.h>
+#include <led/led_driver.h>
+#include <usb/usb_app.h>
 #include <voice/voice_driver.h>
 #include <voice/voice_handle.h>
 
 LOG_MODULE_DECLARE(app, CONFIG_APP_LOG_LEVEL);
-
-/* ── Forward declarations ─────────────────────────────────────────────────── */
-void app_usb_audio_send(const uint8_t *pcm_data, int pcm_size);
 
 /* ── Thread ───────────────────────────────────────────────────────────────── */
 static struct k_thread voice_rx_data;
@@ -45,38 +48,8 @@ static K_SEM_DEFINE(sem_start,   0, 1);   /* pressed  → thread wake  */
 static K_SEM_DEFINE(sem_stopped, 0, 1);   /* thread   → clean exit   */
 static atomic_t voice_rx_running = ATOMIC_INIT(0);
 
-/* ── Work & message queue ─────────────────────────────────────────────────── */
-static struct k_work voice_work_q;
-
-struct voice_msg {
-	uint8_t *buf;
-	uint32_t len;
-};
-
-K_MSGQ_DEFINE(voice_msgq, sizeof(struct voice_msg), 6, 4);
-
-/* ── PCM copy buffer ──────────────────────────────────────────────────────── */
-static uint8_t pcm_copy[VOICE_BLOCK_SIZE];
-
-/* ── Global state ─────────────────────────────────────────────────────────── */
-T_VOICE_GLOBAL_DATA voice_global_data;
-
-/* Shared I2S device handle (defined in voice_driver.c) */
-extern const struct device *dev_i2s;
-
-/* ── Work handler: forward PCM to USB UAC ────────────────────────────────── */
-static void voice_rx_work_handler(struct k_work *item)
-{
-	struct voice_msg ev;
-
-	while (k_msgq_get(&voice_msgq, &ev, K_NO_WAIT) == 0) {
-		if (!voice_driver_global_data.is_voice_driver_working) {
-			break;
-		}
-		app_usb_audio_send(ev.buf, (int)ev.len);
-		voice_global_data.voice_data_total_cnt += ev.len;
-	}
-}
+/* Bytes forwarded to USB in the current session (for logging only) */
+static uint32_t voice_data_total_cnt;
 
 /* ── RX thread ────────────────────────────────────────────────────────────── */
 static void voice_rx_thread_fn(void *p1, void *p2, void *p3)
@@ -111,23 +84,19 @@ static void voice_rx_thread_fn(void *p1, void *p2, void *p3)
 				break;
 			}
 
-			/* Copy before freeing so DMA can immediately reuse slab */
-			uint32_t copy_len = MIN(rx_size, sizeof(pcm_copy));
-			memcpy(pcm_copy, mem_block, copy_len);
+			uint32_t len = MIN(rx_size, (size_t)VOICE_BLOCK_SIZE);
 
+			app_usb_audio_send(mem_block, (int)len);
+			voice_data_total_cnt += len;
+
+			/* Free right away so DMA can reuse the slab block */
 			const struct i2s_config *rx_cfg =
 				i2s_config_get(dev_i2s, I2S_DIR_RX);
 			k_mem_slab_free(rx_cfg->mem_slab, mem_block);
-
-			struct voice_msg ev = { .buf = pcm_copy, .len = copy_len };
-			k_msgq_put(&voice_msgq, &ev, K_NO_WAIT);
-			k_work_submit(&voice_work_q);
 		}
 
 		/* ── Session ended — signal caller ───────────────────────── */
-		LOG_INF("voice rx: session end (total=%u B)",
-			voice_global_data.voice_data_total_cnt);
-		k_msgq_purge(&voice_msgq);
+		LOG_INF("voice rx: session end (total=%u B)", voice_data_total_cnt);
 		k_sem_give(&sem_stopped);
 	}
 }
@@ -143,8 +112,7 @@ bool voice_handle_mic_key_pressed(void)
 	}
 
 	LOG_INF("mic start");
-	memset(&voice_global_data, 0, sizeof(voice_global_data));
-	k_work_init(&voice_work_q, voice_rx_work_handler);
+	voice_data_total_cnt = 0U;
 
 	voice_driver_init();
 
@@ -154,7 +122,7 @@ bool voice_handle_mic_key_pressed(void)
 	if (!rx_thread_created) {
 		k_tid_t tid = k_thread_create(
 			&voice_rx_data, voice_rx_stack,
-			K_KERNEL_STACK_SIZEOF(voice_rx_stack),
+			K_THREAD_STACK_SIZEOF(voice_rx_stack),
 			voice_rx_thread_fn, NULL, NULL, NULL,
 			K_PRIO_COOP(10), 0, K_NO_WAIT);
 		k_thread_name_set(tid, "voice_rx");
@@ -194,4 +162,5 @@ void voice_handle_mic_key_released(void)
 void voice_handle_stop_mic(void)
 {
 	voice_handle_mic_key_released();
+	led_mic_blink_stop();
 }

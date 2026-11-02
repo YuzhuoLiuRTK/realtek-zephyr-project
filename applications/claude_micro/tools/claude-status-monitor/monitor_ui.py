@@ -25,6 +25,10 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 MONITOR_DIR     = Path.home() / ".claude" / "monitor"
+# Header logo, cropped to its ink bbox (Tk cannot load SVG, so a PNG is shipped)
+LOGO_PATH       = Path(__file__).parent / "Realtek.png"
+TITLE_FONT      = ("Segoe UI", 17, "bold")
+TITLE_INK_EM    = 0.74        # Segoe UI Bold ascender ('l', 'd') above baseline, in em
 POLL_INTERVAL_MS = 300
 SUCCESS_RESET_S  = 10
 STALE_ACTIVE_S   = 300
@@ -375,17 +379,51 @@ class ClaudeMonitorUI:
         except Exception as e:
             print(f"[UI] Failed to launch device_listener.py: {e}")
 
+    def _load_logo(self, height: int):
+        """Load Realtek.png scaled to height px; returns None if unavailable (logo is optional)."""
+        if not LOGO_PATH.exists():
+            return None
+        try:
+            from PIL import Image, ImageTk   # smooth resize when Pillow is available
+            img = Image.open(LOGO_PATH)
+            img = img.resize((round(img.width * height / img.height), height), Image.LANCZOS)
+            return ImageTk.PhotoImage(img, master=self.root)
+        except ImportError:
+            img = tk.PhotoImage(master=self.root, file=str(LOGO_PATH))
+            return img.subsample(max(1, round(img.height() / height)))
+        except Exception:
+            return None
+
     def _build_header(self) -> None:
+        import tkinter.font as tkfont
+
         row = tk.Frame(self.root, bg=PALETTE["bg"])
         row.pack(fill=tk.X, padx=20, pady=(18, 4))
+        # Equal-width side columns keep the title centred in the window
+        row.columnconfigure(0, weight=1, uniform="side")
+        row.columnconfigure(2, weight=1, uniform="side")
+
+        # Size the logo to the title's ink height (ascender top -> baseline) and offset
+        # it by the font's internal leading so both share the same top and bottom edge
+        font = tkfont.Font(root=self.root, font=TITLE_FONT)
+        em_px = TITLE_FONT[1] * float(self.root.tk.call("tk", "scaling"))
+        ink_h = round(TITLE_INK_EM * em_px)
+        ink_top = font.metrics("ascent") - ink_h
+
         tk.Label(row, text="Claude Code Monitor",
-                 bg=PALETTE["bg"], fg=PALETTE["text"],
-                 font=("Segoe UI", 17, "bold")).pack(side=tk.LEFT)
+                 bg=PALETTE["bg"], fg=PALETTE["text"], font=font,
+                 bd=0, padx=0, pady=0).grid(row=0, column=1, sticky="n")
+
+        # Keep a reference on self, otherwise Tk drops the image when it is garbage collected
+        self._logo = self._load_logo(ink_h)
+        if self._logo is not None:
+            tk.Label(row, image=self._logo, bg=PALETTE["bg"],
+                     bd=0, padx=0, pady=0).grid(row=0, column=0, sticky="nw", pady=(ink_top, 0))
 
         self._conn_var = tk.StringVar(value="○ 等待连接")
         tk.Label(row, textvariable=self._conn_var,
                  bg=PALETTE["bg"], fg=PALETTE["muted"],
-                 font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=4)
+                 font=("Segoe UI", 9)).grid(row=0, column=2, sticky="e", padx=4)
 
     def _build_panels(self) -> None:
         container = tk.Frame(self.root, bg=PALETTE["bg"])

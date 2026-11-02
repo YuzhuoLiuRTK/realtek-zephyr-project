@@ -17,6 +17,8 @@
 #include <zephyr/usb/usb_ch9.h>
 #include <zephyr/logging/log.h>
 
+#include "usb/usb_app.h"
+
 LOG_MODULE_DECLARE(app, CONFIG_APP_LOG_LEVEL);
 
 #define APP_USB_VID 0x2FE3

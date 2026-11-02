@@ -21,18 +21,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include "button/button.h"
+#include "led/led_driver.h"
+#include "usb/usb_app.h"
+#include "voice/voice_handle.h"
+
 LOG_MODULE_DECLARE(app, CONFIG_APP_LOG_LEVEL);
-
-/* Implemented in src/voice/voice_handle.c */
-bool voice_handle_mic_key_pressed(void);
-void voice_handle_mic_key_released(void);
-
-/* Implemented in src/usb/usb_hid.c */
-void app_usb_hid_send_win_key(uint8_t win_mask, bool pressed);
-
-/* Implemented in src/led/led_driver.c */
-void led_mic_blink_start(void);
-void led_mic_blink_stop(void);
 
 /* ── Deferred work items for mic (cannot block in ISR) ───────────────────── */
 static void mic_press_fn(struct k_work *w)
@@ -66,13 +60,13 @@ void key_handle_mic_release(void)
 }
 
 /* ── btn2: window 1 YES ──────────────────────────────────────────────────── */
-void key_handle_hid_press(void)
+void key_handle_win1_press(void)
 {
 	LOG_INF("btn2 press → win1 YES down");
 	app_usb_hid_send_win_key(0x01u, true);
 }
 
-void key_handle_hid_release(void)
+void key_handle_win1_release(void)
 {
 	LOG_INF("btn2 release → win1 YES up");
 	app_usb_hid_send_win_key(0x01u, false);

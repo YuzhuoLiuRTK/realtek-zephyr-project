@@ -22,6 +22,7 @@
 #include <zephyr/usb/usbd.h>
 #include <zephyr/usb/class/usbd_uac2.h>
 #include <config.h>
+#include <usb/usb_app.h>
 
 LOG_MODULE_DECLARE(app, CONFIG_APP_LOG_LEVEL);
 

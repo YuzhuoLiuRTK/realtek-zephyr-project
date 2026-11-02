@@ -10,6 +10,7 @@
  *   48 kHz → 10 ms × 48 samples/ms × 2 bytes = 960 bytes
  */
 
+#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2s.h>
@@ -17,12 +18,13 @@
 #include <zephyr/logging/log.h>
 #include <config.h>
 #include <voice/voice_driver.h>
+#include <voice/voice_handle.h>
 
 LOG_MODULE_DECLARE(app, CONFIG_APP_LOG_LEVEL);
 
 /* ── Devices ──────────────────────────────────────────────────────────────── */
-const struct device *dev_i2s   = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(i2s0));
-const struct device *dev_codec = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(codec));
+const struct device *const dev_i2s = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(i2s0));
+static const struct device *const dev_codec = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(codec));
 
 /* ── I2S memory slab ──────────────────────────────────────────────────────── */
 #define BLOCK_SIZE    VOICE_BLOCK_SIZE   /* from config.h */
@@ -37,7 +39,25 @@ K_MEM_SLAB_DEFINE(rx_mem_slab, BLOCK_SIZE, NUM_RX_BLOCKS, 32);
 /* ── Timeout watchdog ─────────────────────────────────────────────────────── */
 #define MAX_VOICE_TIMEOUT_SEC   60   /* auto-stop after 60 s */
 
-static void voice_timer_timeout(struct k_timer *timer);
+/* The timer fires in ISR context, but stopping blocks (k_sem_take, I2S/codec
+ * calls), so the stop is deferred to the system workqueue.  This also
+ * serialises it with the button work items.
+ */
+static void voice_timeout_work_fn(struct k_work *w)
+{
+	ARG_UNUSED(w);
+	LOG_WRN("voice timeout — auto-stopping");
+	voice_handle_stop_mic();
+}
+
+static K_WORK_DEFINE(voice_timeout_work, voice_timeout_work_fn);
+
+static void voice_timer_timeout(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	k_work_submit(&voice_timeout_work);
+}
+
 K_TIMER_DEFINE(voice_timer, voice_timer_timeout, NULL);
 
 /* ── Global state (shared with voice_handle.c) ────────────────────────────── */
@@ -46,23 +66,12 @@ T_VOICE_DRIVER_GLOBAL_DATA voice_driver_global_data;
 /* ── Codec config cache (needed by deinit) ────────────────────────────────── */
 static struct audio_codec_cfg codec_cfg;
 
-/* ── Forward ──────────────────────────────────────────────────────────────── */
-void voice_handle_stop_mic(void);
-
-static void voice_timer_timeout(struct k_timer *timer)
-{
-	LOG_WRN("voice timeout — auto-stopping");
-	k_timer_stop(timer);
-	voice_driver_global_data.is_voice_stop_rx_data = true;
-	voice_handle_stop_mic();
-}
-
 /* ── Init ─────────────────────────────────────────────────────────────────── */
 static void voice_driver_init_codec_i2s(void)
 {
 	int ret;
 
-	audio_property_t property = AUDIO_PROPERTY_OUTPUT_VOLUME;//AUDIO_PROPERTY_OUTPUT_MUTE;
+	audio_property_t property = AUDIO_PROPERTY_OUTPUT_VOLUME;
 	audio_channel_t channel   = AUDIO_CHANNEL_ALL;
 	audio_property_value_t val = { .vol = 0x2f };
 
@@ -134,6 +143,10 @@ void voice_driver_deinit(void)
 	LOG_INF("voice_driver_deinit: slab free=%u",
 		k_mem_slab_num_free_get(&rx_mem_slab));
 	k_timer_stop(&voice_timer);
+	/* Drop a timeout that fired just before a manual stop, so it cannot
+	 * stop the next session.  No-op when called from the timeout work.
+	 */
+	(void)k_work_cancel(&voice_timeout_work);
 
 	/* Disable I2S DMA */
 	int ret = i2s_trigger(dev_i2s, I2S_DIR_RX, I2S_TRIGGER_DROP);
@@ -151,5 +164,4 @@ void voice_driver_deinit(void)
 	audio_codec_stop_output(dev_codec);
 
 	voice_driver_global_data.is_voice_driver_working = false;
-	voice_driver_global_data.is_voice_stop_rx_data   = true;
 }

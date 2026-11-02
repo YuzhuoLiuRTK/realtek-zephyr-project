@@ -17,15 +17,20 @@
 #include <zephyr/usb/class/usbd_hid.h>
 #include <zephyr/usb/class/hid.h>
 #include <zephyr/logging/log.h>
+#include <string.h>
 #include <config.h>
 #include "led/led_driver.h"
+#include "usb/usb_app.h"
 
 LOG_MODULE_DECLARE(app, CONFIG_APP_LOG_LEVEL);
 
 /* ── HID report descriptor ────────────────────────────────────────────────── */
 static const uint8_t hid_report_desc[] = {
 	HID_USAGE_PAGE(HID_USAGE_GEN_DESKTOP),
-	HID_USAGE(0x0C),                        /* Consumer Control */
+	/* Generic Desktop usage 0x0C (reserved, not Consumer Control).
+	 * Kept as is so existing hosts still enumerate the same collection.
+	 */
+	HID_USAGE(0x0C),
 	HID_COLLECTION(HID_COLLECTION_APPLICATION),
 
 	/* IN report 0x01: 3 window-YES buttons (Button page, usages 1-3) */

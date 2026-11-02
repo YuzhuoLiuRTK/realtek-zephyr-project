@@ -172,7 +172,7 @@
 		mic-bst-mode = "differential";
 		mic-type = "amic";
 		dmic-data-latch = "rising_latch";
-		ad-gain = <0x2f>;
+		ad-gain = <0x5f>;
 		boost-gain = "0dB";
 		pinctrl-0 = <&codec_default>;
 		pinctrl-names = "default";

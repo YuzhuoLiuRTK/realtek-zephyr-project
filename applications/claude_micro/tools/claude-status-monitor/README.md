@@ -21,7 +21,9 @@
 
 🏷️ **带项目名** —— 消息标题里带上当前项目目录名(取自 `CLAUDE_PROJECT_DIR`),多个会话同时跑也能分清是哪个。
 
-📦 **轻量** —— 仅依赖 `requests`(发 HTTP),其余全是标准库。
+📦 **轻量** —— Teams 通知仅依赖 `requests`(发 HTTP),其余全是标准库。
+
+🖥️ **状态面板 / 设备联动(可选)** —— 桌面面板 + claude_micro USB 设备,见下文「状态面板 + claude_micro 设备」一节。
 
 ---
 
@@ -151,6 +153,74 @@ python notify.py --worker done "项目名"
 
 ---
 
+## 🖥️ 状态面板 + claude_micro 设备(可选)
+
+除 Teams 通知外,本目录还提供一个桌面状态面板,并可配合 `applications/claude_micro` 固件
+(RTL87x2J EVB)使用:设备上的 3 个窗口灯显示最多 3 个 Claude Code 会话的状态,
+3 个 YES 键用于在确认模式下放行对应会话的工具调用,麦克风键按住说话,语音经 Whisper
+转写后粘贴进当前终端。
+
+### 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 额外的 hooks
+
+在上一节 `notify.py` 的基础上,再加入下面几条(同一事件可以挂多个 hook):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "python <项目路径>/state_writer.py pre_tool" },
+          { "type": "command", "command": "python <项目路径>/gate_hook.py" }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "python <项目路径>/state_writer.py permission" } ] }
+    ],
+    "Stop": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "python <项目路径>/state_writer.py stop" } ] }
+    ]
+  }
+}
+```
+
+### 运行
+
+```bash
+python monitor_ui.py        # 状态面板;会自动在后台拉起 device_listener.py
+python led_test_flow.py     # 不开 Claude Code,单独演示一个窗口灯的状态流转
+```
+
+所有进程通过 `~/.claude/monitor/` 下的文件交换状态:
+
+| 文件 | 写入方 | 内容 |
+|------|--------|------|
+| `state_<key>.json` | `state_writer.py` | 会话状态 working / waiting / success |
+| `gate_<key>.json` | `monitor_ui.py`、`gate_hook.py`、`device_listener.py` | 确认模式开关、待确认的工具、allow / block 决定 |
+| `voice_result.json` | `device_listener.py` | 最近一次语音转写结果 |
+
+`<key>` 是 `CLAUDE_PROJECT_DIR` 的 MD5 前 8 位,窗口按会话创建时间排序。
+
+| 状态 | 面板 | 设备窗口灯 |
+|------|------|-----------|
+| idle | 灰 | 灭 |
+| working | 蓝,慢闪 | 慢闪 |
+| waiting | 黄,快闪 | 快闪 |
+| success | 绿(10 s 后回到 idle) | 常亮 |
+
+> **确认模式**:面板上每个窗口的确认开关默认打开。打开时 `gate_hook.py` 会挂起每一次工具调用,
+> 等待面板上的 Yes / No 或设备上的 YES 键,60 s 无操作自动放行。
+
+---
+
 ## ⚙️ 非阻塞原理
 
 Claude Code 的 hook 是**同步**执行的 —— 它会等 hook 命令退出后才继续。如果在 hook 里直接 `requests.post(..., timeout=10)`,网络慢时最坏会把 hook 卡住 **10 秒**,确认框延迟弹出、收尾变慢。
@@ -174,7 +244,15 @@ hook 触发 → 前台进程 spawn 脱离的后台 worker → 前台立刻退出
 .
 ├── notify.py                 # hook 入口:派生后台 worker 发 Teams,非阻塞
 ├── TeamsWorkflowNotifier.py  # 封装 Power Automate Adaptive Card 发送
+├── state_writer.py           # hook 入口:写会话状态文件
+├── gate_hook.py              # PreToolUse hook:确认模式下挂起工具调用,等待放行
+├── monitor_ui.py             # Tk 状态面板(3 个窗口 + Yes/No + 确认开关)
+├── device_listener.py        # claude_micro 设备:HID 按键/窗口灯 + UAC 麦克风 → Whisper
+├── led_test_flow.py          # 窗口灯状态流转测试
+├── Realtek.png               # 面板 logo
+├── requirements.txt
 ├── doc/
+│   ├── architecture.html     # 架构说明
 │   └── images/               # README 配置截图
 └── README.md                 # 本文件
 ```

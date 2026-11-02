@@ -8,13 +8,16 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <zephyr/device.h>
 
 typedef struct {
 	bool is_voice_driver_working;
-	bool is_voice_stop_rx_data;
 } T_VOICE_DRIVER_GLOBAL_DATA;
 
 extern T_VOICE_DRIVER_GLOBAL_DATA voice_driver_global_data;
+
+/* I2S device used for mic capture (defined in voice_driver.c) */
+extern const struct device *const dev_i2s;
 
 void voice_driver_init(void);
 void voice_driver_deinit(void);

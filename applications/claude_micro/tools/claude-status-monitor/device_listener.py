@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 3: USB device listener daemon.
+USB device listener daemon for the claude_micro dongle.
 
 Two threads:
   HID thread  — reads button (VID=0x2fe3, PID=0x0100); press → gate allow
@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import wave
+from collections import deque
 from pathlib import Path
 
 import hid
@@ -23,6 +24,12 @@ import pyautogui
 import pyperclip
 import sounddevice as sd
 from faster_whisper import WhisperModel
+
+try:
+    from opencc import OpenCC          # pip install opencc-python-reimplemented
+    _t2s = OpenCC("t2s").convert
+except ImportError:
+    _t2s = None                        # optional: Traditional -> Simplified fallback
 
 # ---------------------------------------------------------------------------
 # Config
@@ -47,13 +54,23 @@ CHANNELS         = 1
 DTYPE            = "int16"
 BLOCK_SIZE       = 512        # frames per callback
 
-SPEECH_RMS       = 800        # int16 RMS threshold to detect speech
-SILENCE_END_S    = 1.5        # seconds of silence to end a segment
+SPEECH_RMS       = 200        # int16 RMS threshold; board mic: noise ~40, soft speech 120-300
+SILENCE_END_S    = 2.5        # seconds of silence to end a segment; mid-sentence pauses reach ~1.3 s
 MIN_SEGMENT_S    = 0.4        # discard segments shorter than this
 MAX_SEGMENT_S    = 30.0       # force-flush after this duration
+PRE_ROLL_S       = 0.3        # audio kept from before the RMS trigger, so the first syllable is not cut off
 
-WHISPER_MODEL    = "base"
-WHISPER_LANGUAGE = None       # None = auto-detect (supports zh + en)
+SAVE_WAV         = False      # debug: keep each segment as WAV for checking mic level / clipping
+WAV_DIR          = MONITOR_DIR / "voice_wav"
+WAV_KEEP         = 30         # keep only the newest N WAV files
+
+WHISPER_MODEL    = "small"    # base is too weak for Chinese; "large-v3-turbo" is more accurate but slower on CPU
+WHISPER_LANGUAGE = "zh"       # fixed: auto-detect on short clips often picks ja/yue
+# Mixed zh/en example: keeps English terms in English instead of forcing Chinese characters
+WHISPER_PROMPT   = ("以下是中英文混合的句子，英文术语保持英文原样，"
+                    "例如：在 tool 目录下打开 Zephyr SDK，执行 west build。")
+# Domain terms to bias decoding toward (space separated)
+WHISPER_HOTWORDS = "Claude Zephyr SDK tool west build flash 目录 日志 波特率 烧录 编译"
 
 
 # ---------------------------------------------------------------------------
@@ -203,10 +220,33 @@ def _hid_thread() -> None:
 # Whisper worker (runs in its own thread per segment)
 # ---------------------------------------------------------------------------
 
-def _transcribe(audio: np.ndarray) -> None:
-    fd, wav_path = tempfile.mkstemp(suffix=".wav")
-    try:
+def _level_stats(audio: np.ndarray) -> str:
+    a = audio.astype(np.float32)
+    peak = int(np.max(np.abs(a))) if a.size else 0
+    rms = float(np.sqrt(np.mean(a ** 2))) if a.size else 0.0
+    clipped = int(np.count_nonzero(np.abs(audio.astype(np.int32)) >= 32767))
+    return f"peak={peak} rms={rms:.0f} clipped={clipped}"
+
+
+def _new_wav_path() -> str:
+    if not SAVE_WAV:
+        fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
+        return path
+    WAV_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
+    old = sorted(WAV_DIR.glob("seg_*.wav"))
+    for f in old[:max(0, len(old) - WAV_KEEP + 1)]:
+        try:
+            f.unlink()
+        except Exception:
+            pass
+    return str(WAV_DIR / f"seg_{stamp}.wav")
+
+
+def _transcribe(audio: np.ndarray) -> None:
+    wav_path = _new_wav_path()
+    try:
         with wave.open(wav_path, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
@@ -219,8 +259,20 @@ def _transcribe(audio: np.ndarray) -> None:
             language=WHISPER_LANGUAGE,
             beam_size=5,
             vad_filter=True,         # built-in Silero VAD removes leading/trailing silence
+            initial_prompt=WHISPER_PROMPT,
+            hotwords=WHISPER_HOTWORDS,
+            condition_on_previous_text=False,  # avoid repetition/hallucination loops
         )
-        text = " ".join(s.text.strip() for s in segments).strip()
+        # Chinese has no word spaces; join segments directly
+        text = "".join(s.text.strip() for s in segments).strip()
+        if text and _t2s:
+            text = _t2s(text)
+
+        if SAVE_WAV:
+            stats = _level_stats(audio)
+            print(f"[Audio] Saved {Path(wav_path).name} ({stats})")
+            with open(WAV_DIR / "transcripts.log", "a", encoding="utf-8") as log:
+                log.write(f"{Path(wav_path).name}\t{stats}\t{text}\n")
 
         if text:
             print(f"[Whisper] {text}")
@@ -237,10 +289,11 @@ def _transcribe(audio: np.ndarray) -> None:
     except Exception as e:
         print(f"[Whisper] Error: {e}")
     finally:
-        try:
-            os.unlink(wav_path)
-        except Exception:
-            pass
+        if not SAVE_WAV:
+            try:
+                os.unlink(wav_path)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +323,9 @@ def _audio_thread() -> None:
     recording:     bool             = False
     speech_start:  float            = 0.0
     silence_since: float | None     = None
+    # Ring buffer of the most recent blocks seen while idle (pre-roll)
+    pre_roll: deque[np.ndarray] = deque(
+        maxlen=max(1, round(PRE_ROLL_S * SAMPLE_RATE / BLOCK_SIZE)))
 
     def callback(indata, frames, time_info, status):
         nonlocal recording, speech_start, silence_since, buf
@@ -283,13 +339,17 @@ def _audio_thread() -> None:
                 recording    = True
                 speech_start = time.time()
                 buf.clear()
+                buf.extend(pre_roll)     # keep the onset that was below the threshold
+                pre_roll.clear()
                 print("[Audio] Speech started")
             silence_since = None
             buf.append(chunk)
 
         else:
             # — silence —
-            if recording:
+            if not recording:
+                pre_roll.append(chunk)
+            else:
                 buf.append(chunk)
                 now = time.time()
 
@@ -447,7 +507,7 @@ def _led_sync_thread() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    print("[device_listener] Phase 3 starting…")
+    print("[device_listener] Starting…")
     MONITOR_DIR.mkdir(parents=True, exist_ok=True)
 
     # Pre-load Whisper model in background so first transcription is fast

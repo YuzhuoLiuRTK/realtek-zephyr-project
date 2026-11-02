@@ -20,20 +20,12 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 
+#include "button/button.h"
+
 LOG_MODULE_DECLARE(app, CONFIG_APP_LOG_LEVEL);
 
 /* ── Device tree ──────────────────────────────────────────────────────────── */
 #define TEST_PIN_NODE DT_NODELABEL(test_pin)
-
-/* ── Event callbacks (implemented in button_handle.c) ────────────────────── */
-void key_handle_mic_press(void);
-void key_handle_mic_release(void);
-void key_handle_hid_press(void);
-void key_handle_hid_release(void);
-void key_handle_win2_press(void);
-void key_handle_win2_release(void);
-void key_handle_win3_press(void);
-void key_handle_win3_release(void);
 
 struct button {
 	const char *name;
@@ -53,10 +45,10 @@ static struct button buttons[] = {
 		.on_release = key_handle_mic_release,
 	},
 	{
-		.name = "BTN2", .func = "HID key",
+		.name = "BTN2", .func = "win1 YES",
 		.spec = GPIO_DT_SPEC_GET(TEST_PIN_NODE, test_pin2),
-		.on_press = key_handle_hid_press,
-		.on_release = key_handle_hid_release,
+		.on_press = key_handle_win1_press,
+		.on_release = key_handle_win1_release,
 	},
 	{
 		.name = "BTN3", .func = "win2 YES",
