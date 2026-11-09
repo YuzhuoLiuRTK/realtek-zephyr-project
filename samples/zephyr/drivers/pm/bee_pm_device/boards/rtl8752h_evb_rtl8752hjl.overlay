@@ -143,6 +143,7 @@
 };
 
 &i2c0 {
+	/* Bus recovery bit-bangs SCL/SDA through gpioa 4/5 (P0_4/P0_5), keep them free */
 	pinctrl-0 = <&i2c0_default>;
 	pinctrl-names = "default";
 	clock-frequency = <I2C_BITRATE_STANDARD>;

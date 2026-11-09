@@ -5,6 +5,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <zephyr/pm/device_runtime.h>
 #include <zephyr/shell/shell.h>
 
@@ -61,6 +62,8 @@
 #ifdef CONFIG_CAN
 #include <zephyr/drivers/can.h>
 #endif
+
+#include "pm_test.h"
 
 /* Without PCK-600 the platform power manager takes the whole SoC into DLPS at
  * once, but only once every registered check callback agrees, and it calls the
@@ -127,16 +130,10 @@ static const struct device *counter_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(test_co
 #endif
 
 #ifdef CONFIG_GPIO
-#define DEV_OUT DT_GPIO_CTLR(DT_INST(0, test_gpio_basic_api), out_gpios)
-#define DEV_IN  DT_GPIO_CTLR(DT_INST(0, test_gpio_basic_api), in_gpios)
+#define PM_TEST_GPIO_NODE DT_INST(0, test_gpio_basic_api)
 
-#define PIN_OUT       DT_GPIO_PIN(DT_INST(0, test_gpio_basic_api), out_gpios)
-#define PIN_OUT_FLAGS DT_GPIO_FLAGS(DT_INST(0, test_gpio_basic_api), out_gpios)
-#define PIN_IN        DT_GPIO_PIN(DT_INST(0, test_gpio_basic_api), in_gpios)
-#define PIN_IN_FLAGS  DT_GPIO_FLAGS(DT_INST(0, test_gpio_basic_api), in_gpios)
-
-static const struct device *const dev_in = DEVICE_DT_GET_OR_NULL(DEV_IN);
-static const struct device *const dev_out = DEVICE_DT_GET_OR_NULL(DEV_OUT);
+struct gpio_dt_spec gpio_test_out = GPIO_DT_SPEC_GET(PM_TEST_GPIO_NODE, out_gpios);
+struct gpio_dt_spec gpio_test_in = GPIO_DT_SPEC_GET(PM_TEST_GPIO_NODE, in_gpios);
 #endif
 
 #ifdef CONFIG_PWM
@@ -166,8 +163,8 @@ static uint64_t current_sys_time_ms;
 
 #if defined(CONFIG_SENSOR) && defined(CONFIG_QDEC_BEE)
 static const struct device *qdec_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(test_qdec));
-static const struct gpio_dt_spec phase_a = GPIO_DT_SPEC_GET(DT_ALIAS(test_qenca), gpios);
-static const struct gpio_dt_spec phase_b = GPIO_DT_SPEC_GET(DT_ALIAS(test_qencb), gpios);
+struct gpio_dt_spec phase_a = GPIO_DT_SPEC_GET(DT_ALIAS(test_qenca), gpios);
+struct gpio_dt_spec phase_b = GPIO_DT_SPEC_GET(DT_ALIAS(test_qencb), gpios);
 #endif
 
 #ifdef CONFIG_I2C
@@ -267,7 +264,7 @@ int main(void)
 #endif
 
 #ifdef CONFIG_GPIO
-	gpio_pin_configure(dev_out, PIN_OUT, GPIO_OUTPUT_HIGH | PIN_OUT_FLAGS);
+	gpio_pin_configure_dt(&gpio_test_out, GPIO_OUTPUT_HIGH);
 #endif
 
 #ifdef CONFIG_SENSOR
@@ -585,35 +582,34 @@ static int shell_pm_test_gpio(const struct shell *sh, size_t argc, char **argv)
 #ifdef CONFIG_GPIO
 	k_sem_init(&pm_gpio_sem, 0, 1);
 
-	gpio_pin_configure(dev_out, PIN_OUT, GPIO_OUTPUT_LOW | PIN_OUT_FLAGS);
+	gpio_pin_configure_dt(&gpio_test_out, GPIO_OUTPUT_LOW);
 
 #if defined(CONFIG_GPIO_BEE)
-	gpio_pin_configure(dev_in, PIN_IN,
+	gpio_pin_configure(gpio_test_in.port, gpio_test_in.pin,
 			   GPIO_INPUT | GPIO_PULL_UP | BEE_GPIO_INPUT_DEBOUNCE_MS(debounce_ms));
 #endif
 
-	gpio_init_callback(&pm_gpio_cb, pm_gpio_irq_cb, BIT(PIN_IN));
-	gpio_add_callback(dev_in, &pm_gpio_cb);
+	gpio_init_callback(&pm_gpio_cb, pm_gpio_irq_cb, BIT(gpio_test_in.pin));
+	gpio_add_callback_dt(&gpio_test_in, &pm_gpio_cb);
 
 	/* Falling edge */
-	gpio_pin_interrupt_configure(dev_in, PIN_IN, GPIO_INT_EDGE_FALLING | GPIO_INT_WAKEUP);
+	gpio_pin_interrupt_configure_dt(&gpio_test_in, GPIO_INT_EDGE_FALLING | GPIO_INT_WAKEUP);
 	pm_gpio_do_one_round("connect input pin to output pin to wakeup");
 
 	/* Rising edge */
-	gpio_pin_interrupt_configure(dev_in, PIN_IN, GPIO_INT_EDGE_RISING | GPIO_INT_WAKEUP);
+	gpio_pin_interrupt_configure_dt(&gpio_test_in, GPIO_INT_EDGE_RISING | GPIO_INT_WAKEUP);
 	pm_gpio_do_one_round("disconnect input pin to output pin to wakeup");
 
 	/* Both edges */
-	gpio_pin_interrupt_configure(dev_in, PIN_IN, GPIO_INT_EDGE_BOTH | GPIO_INT_WAKEUP);
+	gpio_pin_interrupt_configure_dt(&gpio_test_in, GPIO_INT_EDGE_BOTH | GPIO_INT_WAKEUP);
 	pm_gpio_do_one_round("connect input pin to output pin to wakeup");
 	pm_gpio_do_one_round("disconnect input pin to output pin to wakeup");
 
-	gpio_remove_callback(dev_in, &pm_gpio_cb);
-	gpio_pin_interrupt_configure(dev_in, PIN_IN, GPIO_INT_DISABLE);
+	gpio_remove_callback_dt(&gpio_test_in, &pm_gpio_cb);
+	gpio_pin_interrupt_configure_dt(&gpio_test_in, GPIO_INT_DISABLE);
 
 #if defined(CONFIG_GPIO_BEE)
-	gpio_pin_configure(dev_in, PIN_IN,
-			   (GPIO_INPUT | GPIO_PULL_UP | PIN_IN_FLAGS));
+	gpio_pin_configure_dt(&gpio_test_in, GPIO_INPUT | GPIO_PULL_UP);
 #endif
 
 #endif /* CONFIG_GPIO */
@@ -1023,25 +1019,25 @@ static int shell_pm_test_generate_waveform_gpio(const struct shell *sh, size_t a
 	uint32_t pulse_us = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 10) : 100;
 
 #ifdef CONFIG_GPIO
-	gpio_pin_configure(dev_out, PIN_OUT, GPIO_OUTPUT_HIGH | PIN_OUT_FLAGS);
+	gpio_pin_configure_dt(&gpio_test_out, GPIO_OUTPUT_HIGH);
 
 	for (int i = 0; i < 6; i++) {
 		int level = (i % 2 == 0) ? 1 : 0;
 
-		gpio_pin_set(dev_out, PIN_OUT, level);
+		gpio_pin_set_dt(&gpio_test_out, level);
 		k_busy_wait(debounce_ms * USEC_PER_MSEC);
-		gpio_pin_set(dev_out, PIN_OUT, !level);
+		gpio_pin_set_dt(&gpio_test_out, !level);
 		k_busy_wait(pulse_us);
 
-		gpio_pin_set(dev_out, PIN_OUT, level);
+		gpio_pin_set_dt(&gpio_test_out, level);
 		k_busy_wait(500000);
-		gpio_pin_set(dev_out, PIN_OUT, !level);
+		gpio_pin_set_dt(&gpio_test_out, !level);
 		k_busy_wait(debounce_ms * USEC_PER_MSEC);
-		gpio_pin_set(dev_out, PIN_OUT, level);
+		gpio_pin_set_dt(&gpio_test_out, level);
 		k_busy_wait(500000);
 	}
 
-	gpio_pin_configure(dev_out, PIN_OUT, GPIO_OUTPUT_HIGH | PIN_OUT_FLAGS);
+	gpio_pin_configure_dt(&gpio_test_out, GPIO_OUTPUT_HIGH);
 #endif
 
 	return 0;
