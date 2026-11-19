@@ -166,6 +166,7 @@ static __aligned(32) char spi_rx_buf[BUF_SIZE];
 #ifdef CONFIG_RTC
 static const struct device *rtc_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(test_rtc));
 static uint64_t current_sys_time_ms;
+static uint32_t rtc_timeout_ms;
 #endif
 
 #if defined(CONFIG_SENSOR) && defined(CONFIG_QDEC_BEE)
@@ -463,6 +464,7 @@ static int shell_pm_test_uart_dma(const struct shell *sh, size_t argc, char **ar
 
 #ifdef CONFIG_COUNTER
 static struct k_sem pm_counter_sem;
+static int64_t pm_counter_elapsed_ms;
 
 static void counter_top_cb(const struct device *dev, void *user_data)
 {
@@ -470,6 +472,8 @@ static void counter_top_cb(const struct device *dev, void *user_data)
 
 	uint64_t *pre_sys_time_ms = (uint64_t *)user_data;
 	uint64_t now_ms = k_uptime_get();
+
+	pm_counter_elapsed_ms = now_ms - *pre_sys_time_ms;
 
 	printf("top_handler\n");
 	pm_test_print_wakeup_count();
@@ -501,6 +505,7 @@ static int shell_pm_test_counter(const struct shell *sh, size_t argc, char **arg
 	}
 
 	k_sem_init(&pm_counter_sem, 0, 1);
+	pm_counter_elapsed_ms = -1;
 
 	timeout_ms = strtoul(argv[1], NULL, 10);
 
@@ -509,11 +514,12 @@ static int shell_pm_test_counter(const struct shell *sh, size_t argc, char **arg
 	top_cfg.callback = counter_top_cb;
 	top_cfg.flags = 0;
 	top_cfg.ticks = counter_us_to_ticks(counter_dev, timeout_ms * 1000);
-	pre_sys_time_ms = k_uptime_get();
 	top_cfg.user_data = &pre_sys_time_ms;
 
-	printf("[%lld] wait %lldms to trigger handler\n", pre_sys_time_ms, timeout_ms);
+	printf("[%lld] wait %lldms to trigger handler\n", k_uptime_get(), timeout_ms);
 
+	/* Taken after the printf, it blocks for ms on a 115200 console */
+	pre_sys_time_ms = k_uptime_get();
 	counter_set_top_value(counter_dev, &top_cfg);
 
 #if defined(BEE_PM_TEST_DLPS_CB)
@@ -521,10 +527,17 @@ static int shell_pm_test_counter(const struct shell *sh, size_t argc, char **arg
 	k_sem_init(&pm_app_sem, 0, 1);
 	k_sem_take(&pm_app_sem, K_FOREVER);
 #else
-	k_sem_take(&pm_counter_sem, K_FOREVER);
+	k_sem_take(&pm_counter_sem, K_MSEC(timeout_ms + 1000));
 #endif
 
 	counter_stop(counter_dev);
+
+	/* -1ms means the callback never came */
+	printf("[%lld] counter test %s: %lldms, %lldms expected\n", k_uptime_get(),
+	       pm_counter_elapsed_ms >= 0 && llabs(pm_counter_elapsed_ms - (int64_t)timeout_ms) <= 1
+		       ? "PASS"
+		       : "FAIL",
+	       pm_counter_elapsed_ms, timeout_ms);
 #endif /* CONFIG_COUNTER */
 
 	return 0;
@@ -635,14 +648,13 @@ static int shell_pm_test_latch(const struct shell *sh, size_t argc, char **argv)
 
 static struct gpio_callback pm_gpio_cb;
 static struct k_sem pm_gpio_sem;
+static uint8_t irq_count;
 
 static void pm_gpio_irq_cb(const struct device *dev_in, struct gpio_callback *cb, uint32_t pins)
 {
 	ARG_UNUSED(dev_in);
 	ARG_UNUSED(cb);
 	ARG_UNUSED(pins);
-
-	static uint8_t irq_count;
 
 #if defined(BEE_PM_TEST_DLPS_CB)
 	pm_dlps_check_flag = PM_TEST_CHECK_FAIL;
@@ -655,24 +667,34 @@ static void pm_gpio_irq_cb(const struct device *dev_in, struct gpio_callback *cb
 	irq_count++;
 }
 
-static void pm_gpio_do_one_round(const char *hint)
+/* Returns false if no edge came within the timeout */
+static bool pm_gpio_do_one_round(const char *hint, k_timeout_t timeout)
 {
+	int ret;
+
 #if defined(BEE_PM_TEST_DLPS_CB)
 	printf("[%lld] before enter dlps\n", k_uptime_get());
 	printf("[%lld] %s\n", k_uptime_get(), hint);
 
 	pm_dlps_check_flag = PM_TEST_CHECK_PASS;
 	k_sem_init(&pm_app_sem, 0, 1);
-	k_sem_take(&pm_app_sem, K_FOREVER);
+	ret = k_sem_take(&pm_app_sem, timeout);
 	pm_dlps_check_flag = PM_TEST_CHECK_FAIL;
 
 	printf("[%lld] after exit dlps\n", k_uptime_get());
 #else
 	printf("[%lld] %s\n", k_uptime_get(), hint);
-	k_sem_take(&pm_gpio_sem, K_FOREVER);
+	ret = k_sem_take(&pm_gpio_sem, timeout);
 #endif
 
+	if (ret < 0) {
+		printf("[%lld] no edge\n", k_uptime_get());
+		return false;
+	}
+
 	k_busy_wait(100000);
+
+	return true;
 }
 
 #endif /* CONFIG_GPIO */
@@ -684,9 +706,15 @@ static int shell_pm_test_gpio(const struct shell *sh, size_t argc, char **argv)
 	pm_test_print_wakeup_count();
 
 	int debounce_ms = argc > 1 ? (int)strtoul(argv[1], NULL, 10) : 8;
+	uint32_t timeout_ms = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 10) : 0;
 
 #ifdef CONFIG_GPIO
+	/* 0 waits for each edge forever */
+	k_timeout_t timeout = timeout_ms ? K_MSEC(timeout_ms) : K_FOREVER;
+	int rounds = 0;
+
 	k_sem_init(&pm_gpio_sem, 0, 1);
+	irq_count = 0;
 
 	gpio_pin_configure_dt(&gpio_test_out, GPIO_OUTPUT_LOW);
 
@@ -700,19 +728,22 @@ static int shell_pm_test_gpio(const struct shell *sh, size_t argc, char **argv)
 
 	/* Falling edge */
 	gpio_pin_interrupt_configure_dt(&gpio_test_in, GPIO_INT_EDGE_FALLING | GPIO_INT_WAKEUP);
-	pm_gpio_do_one_round("connect input pin to output pin to wakeup");
+	rounds += pm_gpio_do_one_round("connect input pin to output pin to wakeup", timeout);
 
 	/* Rising edge */
 	gpio_pin_interrupt_configure_dt(&gpio_test_in, GPIO_INT_EDGE_RISING | GPIO_INT_WAKEUP);
-	pm_gpio_do_one_round("disconnect input pin to output pin to wakeup");
+	rounds += pm_gpio_do_one_round("disconnect input pin to output pin to wakeup", timeout);
 
 	/* Both edges */
 	gpio_pin_interrupt_configure_dt(&gpio_test_in, GPIO_INT_EDGE_BOTH | GPIO_INT_WAKEUP);
-	pm_gpio_do_one_round("connect input pin to output pin to wakeup");
-	pm_gpio_do_one_round("disconnect input pin to output pin to wakeup");
+	rounds += pm_gpio_do_one_round("connect input pin to output pin to wakeup", timeout);
+	rounds += pm_gpio_do_one_round("disconnect input pin to output pin to wakeup", timeout);
 
 	gpio_remove_callback_dt(&gpio_test_in, &pm_gpio_cb);
 	gpio_pin_interrupt_configure_dt(&gpio_test_in, GPIO_INT_DISABLE);
+
+	printf("[%lld] gpio test %s: %d callbacks, %d rounds woken, 4 expected\n", k_uptime_get(),
+	       rounds == 4 && irq_count == 4 ? "PASS" : "FAIL", irq_count, rounds);
 
 #if defined(CONFIG_GPIO_BEE)
 	gpio_pin_configure_dt(&gpio_test_in, GPIO_INPUT | GPIO_PULL_UP);
@@ -922,6 +953,7 @@ static int shell_pm_test_spi(const struct shell *sh, size_t argc, char **argv)
 
 	if (spi_complete_loop(&spi_spec) < 0) {
 		printf("[%lld] loopback test fail\n", k_uptime_get());
+		printf("[%lld] spi test FAIL: 0 loops matched, 2 expected\n", k_uptime_get());
 		return 0;
 	}
 
@@ -931,8 +963,11 @@ static int shell_pm_test_spi(const struct shell *sh, size_t argc, char **argv)
 
 	if (spi_complete_loop(&spi_spec) < 0) {
 		printf("[%lld] loopback test fail\n", k_uptime_get());
+		printf("[%lld] spi test FAIL: 1 loops matched, 2 expected\n", k_uptime_get());
 		return 0;
 	}
+
+	printf("[%lld] spi test PASS: 2 loops matched, 2 expected\n", k_uptime_get());
 
 #endif /* CONFIG_SPI */
 
@@ -964,9 +999,15 @@ static void test_rtc_alarm_cb(const struct device *dev, uint16_t id, void *user_
 	uint64_t *pre_sys_time_ms = (uint64_t *)user_data;
 	uint64_t now_ms = k_uptime_get();
 
+	int64_t elapsed_ms = now_ms - *pre_sys_time_ms;
+
 	pm_test_print_wakeup_count();
-	printf("[%lld] trigger handler after %lldms\n", now_ms,
-	       now_ms - (*(uint64_t *)pre_sys_time_ms));
+	printf("[%lld] trigger handler after %lldms\n", now_ms, elapsed_ms);
+
+	/* The alarm only has second resolution */
+	printf("[%lld] rtc test %s: %lldms, %ums expected\n", now_ms,
+	       llabs(elapsed_ms - (int64_t)(rtc_timeout_ms / 1000 * 1000)) <= 5 ? "PASS" : "FAIL",
+	       elapsed_ms, rtc_timeout_ms / 1000 * 1000);
 
 #if defined(BEE_PM_TEST_DLPS_CB)
 	k_sem_give(&pm_app_sem);
@@ -994,6 +1035,7 @@ __maybe_unused static int shell_pm_test_rtc(const struct shell *sh, size_t argc,
 		timeout_ms = strtoul(argv[1], NULL, 10);
 	}
 	printf("Setting RTC alarm for %u ms\n", timeout_ms);
+	rtc_timeout_ms = timeout_ms;
 	rtc_alarm_set_callback(rtc_dev, 0, NULL, NULL);
 	rtc_set_time(rtc_dev, &test_rtc_time_set);
 
@@ -1023,7 +1065,16 @@ __maybe_unused static int shell_pm_test_rtc(const struct shell *sh, size_t argc,
 }
 
 #if defined(CONFIG_SENSOR) && defined(CONFIG_QDEC_BEE)
+/* waveform_qdec steps 10 forward, 20 back and 10 forward again */
+#define PM_QDEC_STEPS 40
+
 static int qdec_cb_count;
+static int qdec_positions[PM_QDEC_STEPS];
+
+static int qdec_expected_position(int step)
+{
+	return step < 10 ? step + 1 : step < 30 ? 19 - step : step - 39;
+}
 
 static void qdec_data_ready_cb(const struct device *dev, const struct sensor_trigger *trig)
 {
@@ -1032,6 +1083,10 @@ static void qdec_data_ready_cb(const struct device *dev, const struct sensor_tri
 	ARG_UNUSED(trig);
 	sensor_sample_fetch(dev);
 	sensor_channel_get(dev, SENSOR_CHAN_QDEC_X_COUNT, &val);
+
+	if (qdec_cb_count < PM_QDEC_STEPS) {
+		qdec_positions[qdec_cb_count] = val.val1;
+	}
 
 	pm_test_print_wakeup_count();
 	printf("Position[%d] = %d degrees\n", qdec_cb_count++, val.val1);
@@ -1104,10 +1159,25 @@ static int shell_pm_test_qdec(const struct shell *sh, size_t argc, char **argv)
 			.chan = (enum sensor_channel)SENSOR_CHAN_QDEC_X_COUNT,
 		};
 
+		int matched = 0;
+		int mirrored = 0;
+
 		qdec_cb_count = 0;
 		sensor_trigger_set(qdec_dev, &trig, qdec_data_ready_cb);
 		k_sleep(K_SECONDS(10));
 		sensor_trigger_set(qdec_dev, &trig, NULL);
+
+		/* The sign depends on which wire goes to phase A, accept either */
+		for (int i = 0; i < MIN(qdec_cb_count, PM_QDEC_STEPS); i++) {
+			matched += qdec_positions[i] == qdec_expected_position(i);
+			mirrored += qdec_positions[i] == -qdec_expected_position(i);
+		}
+		matched = MAX(matched, mirrored);
+
+		printf("[%lld] qdec test %s: %d callbacks, %d positions matched, %d expected\n",
+		       k_uptime_get(),
+		       qdec_cb_count == PM_QDEC_STEPS && matched == PM_QDEC_STEPS ? "PASS" : "FAIL",
+		       qdec_cb_count, matched, PM_QDEC_STEPS);
 	}
 #endif
 #endif
@@ -1195,6 +1265,7 @@ static int shell_pm_test_i2c(const struct shell *sh, size_t argc, char **argv)
 
 #ifdef CONFIG_I2C
 	uint8_t icm20618_addr = 0x68;
+	uint8_t id[2];
 	uint8_t write_buf[6];
 	uint8_t read_buf[12];
 	int write_len;
@@ -1211,6 +1282,7 @@ static int shell_pm_test_i2c(const struct shell *sh, size_t argc, char **argv)
 	i2c_write_read(i2c_dev, icm20618_addr, write_buf, write_len, read_buf, read_len);
 
 	printf("icm20618 addr:0x%x reg:0x%x = 0x%x\n", icm20618_addr, write_buf[0], read_buf[0]);
+	id[0] = read_buf[0];
 
 #if defined(BEE_PM_TEST_DLPS_CB)
 	pm_test_enter_dlps_forever();
@@ -1227,6 +1299,10 @@ static int shell_pm_test_i2c(const struct shell *sh, size_t argc, char **argv)
 	i2c_write_read(i2c_dev, icm20618_addr, write_buf, write_len, read_buf, read_len);
 
 	printf("icm20618 addr:0x%x reg:0x%x = 0x%x\n", icm20618_addr, write_buf[0], read_buf[0]);
+	id[1] = read_buf[0];
+
+	printf("[%lld] i2c test %s: 0x%x 0x%x, 0xa0 0xa0 expected\n", k_uptime_get(),
+	       id[0] == 0xa0 && id[1] == 0xa0 ? "PASS" : "FAIL", id[0], id[1]);
 
 #endif /* CONFIG_I2C */
 
@@ -1321,6 +1397,10 @@ static int shell_pm_test_adc(const struct shell *sh, size_t argc, char **argv)
 
 #if defined(BEE_PM_TEST_DLPS_CB)
 	pm_test_enter_dlps_forever();
+#else
+	/* Longer than the shell UART keep active timeout, so idle enters DLPS */
+	k_sleep(K_SECONDS(2));
+	pm_test_print_wakeup_count();
 #endif
 
 	ret = do_single_adc_read(&adc_channels[0], &val_after);
@@ -1329,6 +1409,12 @@ static int shell_pm_test_adc(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		printf("ADC sample after dlps failed: %d\n", ret);
 	}
+
+	/* The channel pad is tied to GND, INVALID_ADC_VALUE marks a failed read */
+	printf("[%lld] adc test %s: %d %d, 0..499 expected\n", k_uptime_get(),
+	       val_before >= 0 && val_before < 500 && val_after >= 0 && val_after < 500 ? "PASS"
+										  : "FAIL",
+	       val_before, val_after);
 
 #endif /* CONFIG_ADC */
 
@@ -1432,6 +1518,7 @@ static struct k_sem can_rx_sem;
 static uint8_t can_tx_data[8];
 static uint8_t can_rx_data[8];
 static int rx_count;
+static int can_errors;
 
 static void can_tx_cb(const struct device *dev, int error, void *user_data)
 {
@@ -1502,6 +1589,7 @@ static int shell_pm_test_can(const struct shell *sh, size_t argc, char **argv)
 	k_sem_init(&can_tx_sem, 0, 1);
 	k_sem_init(&can_rx_sem, 0, 1);
 	rx_count = 0;
+	can_errors = 0;
 
 	filter.id = 0x123;
 	filter.mask = 0x7FF;
@@ -1515,9 +1603,11 @@ static int shell_pm_test_can(const struct shell *sh, size_t argc, char **argv)
 	}
 	if (k_sem_take(&can_tx_sem, K_MSEC(200)) != 0) {
 		printf("tx timeout\n");
+		can_errors++;
 	}
 	if (k_sem_take(&can_rx_sem, K_MSEC(200)) != 0) {
 		printf("rx timeout\n");
+		can_errors++;
 	}
 
 	/* Verify RX data matches TX */
@@ -1525,6 +1615,7 @@ static int shell_pm_test_can(const struct shell *sh, size_t argc, char **argv)
 		printf("tx/rx match\n");
 	} else {
 		printf("tx/rx mismatch\n");
+		can_errors++;
 		printf("  rx_count: %d\n", rx_count);
 		printf("  tx_data:");
 		for (int i = 0; i < 8; i++) {
@@ -1550,6 +1641,7 @@ static int shell_pm_test_can(const struct shell *sh, size_t argc, char **argv)
 
 	if (rx_count != 0) {
 		printf("unexpected rx\n");
+		can_errors++;
 	}
 
 	/* Test 3: Add filter, enter DLPS, TX, check RX */
@@ -1565,15 +1657,18 @@ static int shell_pm_test_can(const struct shell *sh, size_t argc, char **argv)
 	ret = can_send(can_dev, &frame, K_MSEC(100), can_tx_cb, NULL);
 	if (k_sem_take(&can_tx_sem, K_MSEC(200)) != 0) {
 		printf("tx timeout after DLPS\n");
+		can_errors++;
 	}
 	if (k_sem_take(&can_rx_sem, K_MSEC(200)) != 0) {
 		printf("rx timeout after DLPS\n");
+		can_errors++;
 	}
 
 	if (rx_count == 1 && memcmp(can_tx_data, can_rx_data, 8) == 0) {
 		printf("tx/rx match\n");
 	} else {
 		printf("tx/rx mismatch\n");
+		can_errors++;
 		printf("  rx_count: %d\n", rx_count);
 		printf("  tx_data:");
 		for (int i = 0; i < 8; i++) {
@@ -1599,9 +1694,13 @@ static int shell_pm_test_can(const struct shell *sh, size_t argc, char **argv)
 
 	if (rx_count != 0) {
 		printf("unexpected rx\n");
+		can_errors++;
 	}
 
 	can_stop(can_dev);
+
+	printf("[%lld] can test %s: %d errors, 0 expected\n", k_uptime_get(),
+	       can_errors == 0 ? "PASS" : "FAIL", can_errors);
 
 #endif /* CONFIG_CAN */
 
@@ -1665,7 +1764,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_pm_test_counter,
 			      "hand back the runtime pm reference the shell backend holds",        \
 			      shell_pm_test_shell_uart_put, 0, 0),                                 \
 		SHELL_CMD_ARG(uartdma, NULL, "uart dma pm test", shell_pm_test_uart_dma, 0, 0),    \
-		SHELL_CMD_ARG(gpio, NULL, "gpio pm test [debounce_ms]", shell_pm_test_gpio, 0, 1), \
+		SHELL_CMD_ARG(gpio, NULL, "gpio pm test [debounce_ms [timeout_ms]]",               \
+			      shell_pm_test_gpio, 0, 2),                                           \
 		SHELL_CMD_ARG(pwm, NULL, "pwm pm test", shell_pm_test_pwm, 0, 0),                  \
 		SHELL_CMD_ARG(lppwm, NULL, "lppwm pm test", shell_pm_test_lppwm, 0, 0),            \
 		SHELL_CMD_ARG(counter, &sub_pm_test_counter, "counter pm test (input time in ms)", \
